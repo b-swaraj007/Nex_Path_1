@@ -2,6 +2,8 @@
 
 This document describes the Firebase backend architecture and how to deploy and use it.
 
+**Why is Firestore empty?** Firestore has no schema or seed data. Documents are created when your app runs: e.g. `users/{uid}` when a user signs in or completes onboarding, `chatSessions` when they start a chat, `psychometric/profile` when they submit the assessment. So an empty database in the console is normal until users use the app.
+
 ## Architecture Overview
 
 - **Frontend** (Next.js): Auth, Firestore listeners, calls Cloud Functions
@@ -29,19 +31,28 @@ users/{userId}/reports/{reportId}
 
 ## Setup
 
-### 1. Firebase Project
+### 1. Firebase Project & Firestore Database
 
-1. Create a project at [Firebase Console](https://console.firebase.google.com)
+1. Create a project at [Firebase Console](https://console.firebase.google.com) (or use an existing one).
 2. **Enable Authentication:**
-   - Go to **Authentication** → **Sign-in method**
+   - Go to **Build** → **Authentication** → **Sign-in method**
    - Enable **Email/Password** (and **Email link** if you want)
    - Enable **Google** and set support email / project public name
-3. Create a Firestore database
-4. Run `firebase login` and `firebase use <project-id>`
+3. **Create the Firestore database (required before anything works):**
+   - Go to **Build** → **Firestore Database**
+   - Click **Create database**
+   - Choose **Start in production mode** (we deploy rules next) or **test mode** for quick local testing
+   - Pick a region (e.g. `us-central1`) and confirm
+   - The database will be empty until your app and Cloud Functions create documents (e.g. on sign-up, chat, psychometric submit)
+4. Link your project locally:
+   ```bash
+   firebase login
+   firebase use <your-project-id>
+   ```
 
-### 2. Environment Variables
+### 2. Environment Variables (Frontend)
 
-Copy `.env.example` to `.env.local` and fill in your Firebase config from Firebase Console > Project Settings > General:
+Copy `.env.example` to `.env.local` and fill in your Firebase config from **Firebase Console** → **Project settings** (gear) → **General** → **Your apps**:
 
 ```bash
 cp .env.example .env.local
@@ -49,30 +60,57 @@ cp .env.example .env.local
 
 Then edit `.env.local` with your values. Do not commit `.env.local` (it's in `.gitignore`).
 
-### 3. OpenAI API Key (Secret)
+### 3. OpenAI API Key (Backend Secret)
 
-Set the secret for Cloud Functions:
+Cloud Functions need your OpenAI API key as a secret:
 
 ```bash
 firebase functions:secrets:set OPENAI_API_KEY
 # Enter your OpenAI API key when prompted
 ```
 
-### 4. Deploy Cloud Functions
+**Verify the secret:**
+
+- List secrets:  
+  `firebase functions:secrets:access OPENAI_API_KEY`  
+  (prompts to view the value; use only locally, never log it.)
+- Or in **Google Cloud Console** → **Security** → **Secret Manager** → confirm `OPENAI_API_KEY` exists and has a version with your key.
+- The key must be a valid **OpenAI API key** (starts with `sk-...`). Create one at [platform.openai.com/api-keys](https://platform.openai.com/api-keys). No extra spaces or newlines when pasting.
+
+### 4. Deploy Everything (Firestore + Functions)
+
+Deploy **Firestore rules**, **Firestore indexes**, and **Cloud Functions** in one go:
 
 ```bash
-cd functions
-npm install
-npm run build
-cd ..
-firebase deploy --only functions
+firebase deploy
 ```
 
-### 5. Deploy Firestore Rules
+Or from the project root using npm:
 
 ```bash
-firebase deploy --only firestore:rules
+npm run deploy:firebase
 ```
+
+This will:
+
+- Deploy **Firestore rules** (`firestore.rules`) so your app can read/write `users/{userId}`, chat sessions, psychometric profile, etc.
+- Deploy **Firestore indexes** (`firestore.indexes.json`) so queries for chat sessions and messages work.
+- Build and deploy **Cloud Functions** (chat, psychometric, etc.).
+
+**First-time only:** Ensure `functions` dependencies are installed:
+
+```bash
+cd functions && npm install && cd ..
+```
+
+Then run `firebase deploy` (or `npm run deploy:firebase`) again if needed.
+
+### 5. Deploy Only One Part (Optional)
+
+- Firestore rules + indexes only:  
+  `firebase deploy --only firestore`
+- Cloud Functions only:  
+  `firebase deploy --only functions`
 
 ## Cloud Functions
 

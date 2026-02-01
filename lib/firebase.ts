@@ -181,6 +181,22 @@ export async function sendChatMessage(sessionId: string, userMessage: string) {
 }
 
 /**
+ * Get a user-facing message from a callable function error.
+ * Firebase callables throw with code/message; we prefer the server message when available.
+ */
+export function getCallableErrorMessage(err: unknown): string {
+  if (err instanceof Error) {
+    const msg = err.message || ""
+    if (msg === "INTERNAL" || msg === "internal" || msg.startsWith("INTERNAL:"))
+      return "Server error. Check that Cloud Functions are deployed and try again."
+    if (msg.includes("OPENAI_API_KEY") || msg.includes("OpenAI API key"))
+      return "OpenAI API key is not set. Add OPENAI_API_KEY in Firebase Secret Manager and redeploy functions."
+    return msg
+  }
+  return "Something went wrong. Please try again."
+}
+
+/**
  * Callable: createChatSession
  */
 export async function createChatSession(
@@ -193,6 +209,24 @@ export async function createChatSession(
   >(functions, "createChatSession")
   const result = await callable({ title, hasAssessment })
   return result.data
+}
+
+/**
+ * Callable: createPsychometricChatSession
+ * Creates a session with hasAssessment: true and writes an initial profile synthesis
+ * assistant message. Use when user continues from psychometric results to chat.
+ */
+export async function createPsychometricChatSession(): Promise<{
+  sessionId: string
+  title: string
+  hasAssessment: boolean
+}> {
+  const callable = httpsCallable<
+    void,
+    { sessionId: string; title: string; hasAssessment: boolean }
+  >(functions, "createPsychometricChatSession")
+  const result = await callable()
+  return result.data as { sessionId: string; title: string; hasAssessment: boolean }
 }
 
 /**
@@ -212,4 +246,66 @@ export async function getChatSessions() {
   >(functions, "getChatSessions")
   const result = await callable()
   return result.data
+}
+
+/** Canonical psychometric response (backend→UI) */
+export interface PsychometricCRI {
+  score: number
+  max: number
+  band: string
+  summary: string
+  disclaimer: string
+}
+
+export interface PsychometricParameterStored {
+  score: number
+  max: number
+  status: "active" | "removed"
+  interpretation: string
+}
+
+export interface PsychometricResult {
+  CRI: PsychometricCRI
+  parameters: Record<string, PsychometricParameterStored>
+  userCorrections?: Record<string, string>
+  removedInsights?: string[]
+}
+
+/**
+ * Callable: submitPsychometric
+ * Submit raw answers; returns CRI + parameters + interpretations (stored in Firestore).
+ */
+export async function submitPsychometric(answers: Record<string, number>): Promise<PsychometricResult> {
+  const callable = httpsCallable<
+    { answers: Record<string, number> },
+    PsychometricResult
+  >(functions, "submitPsychometric")
+  const result = await callable({ answers })
+  return result.data as PsychometricResult
+}
+
+/**
+ * Callable: updatePsychometricCorrections
+ * Update user corrections and/or removed insights (excluded from LLM context).
+ */
+export async function updatePsychometricCorrections(
+  userCorrections?: Record<string, string>,
+  removedInsights?: string[]
+): Promise<PsychometricResult> {
+  const callable = httpsCallable<
+    { userCorrections?: Record<string, string>; removedInsights?: string[] },
+    PsychometricResult
+  >(functions, "updatePsychometricCorrections")
+  const result = await callable({ userCorrections, removedInsights })
+  return result.data as PsychometricResult
+}
+
+/**
+ * Get psychometric profile from Firestore (users/{uid}/psychometric/profile)
+ */
+export async function getPsychometricProfile(uid: string): Promise<PsychometricResult | null> {
+  const ref = doc(db, "users", uid, "psychometric", "profile")
+  const snap = await getDoc(ref)
+  if (!snap.exists()) return null
+  return snap.data() as PsychometricResult
 }

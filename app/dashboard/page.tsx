@@ -2,6 +2,9 @@
 
 import React, { useState, useRef, useEffect } from "react"
 import Link from "next/link"
+import { useRouter } from "next/navigation"
+import { onAuthStateChanged } from "firebase/auth"
+import { auth, createChatSession, getCallableErrorMessage } from "@/lib/firebase"
 import { Button } from "@/components/ui/button"
 import {
   MessageSquare,
@@ -10,16 +13,68 @@ import {
   Sparkles,
   User,
   RefreshCw,
+  Loader2,
+  AlertCircle,
 } from "lucide-react"
 
 export default function DashboardPage() {
+  const router = useRouter()
   const [isVisible, setIsVisible] = useState(false)
   const [hoveredCard, setHoveredCard] = useState<string | null>(null)
+  const [isCreatingChat, setIsCreatingChat] = useState(false)
+  const [isCreatingNew, setIsCreatingNew] = useState(false)
+  const [authReady, setAuthReady] = useState(false)
+  const [chatError, setChatError] = useState<string | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (user) => {
+      setAuthReady(true)
+      if (!user) router.replace("/auth")
+    })
+    return () => unsub()
+  }, [router])
 
   useEffect(() => {
     setIsVisible(true)
   }, [])
+
+  const handleStartChat = async (e: React.MouseEvent) => {
+    e.preventDefault()
+    if (!auth.currentUser || isCreatingChat) return
+    setChatError(null)
+    setIsCreatingChat(true)
+    try {
+      const { sessionId } = await createChatSession("Career Chat", false)
+      if (sessionId) {
+        router.push(`/chat?sessionId=${sessionId}`)
+      } else {
+        setChatError("Could not create chat session. Please try again.")
+      }
+    } catch (err) {
+      setChatError(getCallableErrorMessage(err))
+    } finally {
+      setIsCreatingChat(false)
+    }
+  }
+
+  const handleStartNewSession = async () => {
+    if (!auth.currentUser || isCreatingNew) return
+    setChatError(null)
+    setIsCreatingNew(true)
+    try {
+      const { sessionId } = await createChatSession("New Career Session", false)
+      if (sessionId) {
+        router.push(`/chat?sessionId=${sessionId}`)
+      } else {
+        setChatError("Could not create chat session. Please try again.")
+      }
+    } catch (err) {
+      setChatError(getCallableErrorMessage(err))
+    } finally {
+      setIsCreatingNew(false)
+    }
+  }
 
   useEffect(() => {
     const container = containerRef.current
@@ -118,6 +173,18 @@ export default function DashboardPage() {
           </div>
         </header>
 
+        {/* Chat error banner */}
+        {chatError && (
+          <div className="mb-6 p-4 rounded-xl bg-destructive/10 border border-destructive/30 text-destructive text-sm flex items-start gap-3">
+            <AlertCircle size={20} className="flex-shrink-0 mt-0.5" />
+            <div>
+              <p className="font-medium">Could not open chat</p>
+              <p className="mt-1">{chatError}</p>
+              <p className="mt-2 text-destructive/80 text-xs">Make sure you’re signed in and Cloud Functions are deployed. Try again.</p>
+            </div>
+          </div>
+        )}
+
         {/* Main Action Cards */}
         <div
           className={`grid md:grid-cols-2 gap-6 mb-8 transition-all duration-700 delay-150 ${
@@ -125,11 +192,11 @@ export default function DashboardPage() {
           }`}
         >
           {/* Chat Card */}
-          <Link
-            href="/chat"
-            className="block group"
+          <div
+            className="block group cursor-pointer"
             onMouseEnter={() => setHoveredCard("chat")}
             onMouseLeave={() => setHoveredCard(null)}
+            onClick={handleStartChat}
           >
             <div
               className={`relative h-full rounded-2xl overflow-hidden border transition-all duration-500 ${
@@ -177,15 +244,28 @@ export default function DashboardPage() {
               </ul>
 
               {/* Button */}
-              <Button className="w-full bg-primary text-primary-foreground hover:bg-primary/90 font-medium py-5 text-base gap-2 group/btn">
-                Start Career Chat
-                <ArrowRight
-                  size={18}
-                  className="group-hover/btn:translate-x-1 transition-transform"
-                />
+              <Button
+                type="button"
+                disabled={!authReady || isCreatingChat}
+                className="w-full bg-primary text-primary-foreground hover:bg-primary/90 font-medium py-5 text-base gap-2 group/btn"
+              >
+                {isCreatingChat ? (
+                  <>
+                    <Loader2 size={18} className="animate-spin" />
+                    Starting…
+                  </>
+                ) : (
+                  <>
+                    Start Career Chat
+                    <ArrowRight
+                      size={18}
+                      className="group-hover/btn:translate-x-1 transition-transform"
+                    />
+                  </>
+                )}
               </Button>
             </div>
-          </Link>
+          </div>
 
           {/* Assessment Card */}
           <Link
@@ -273,13 +353,25 @@ export default function DashboardPage() {
             isVisible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-4"
           }`}
         >
-          <button className="flex items-center gap-2 text-sm text-muted-foreground hover:text-primary transition-colors">
+          <Link
+            href="/profile"
+            className="flex items-center gap-2 text-sm text-muted-foreground hover:text-primary transition-colors"
+          >
             <User size={16} />
             View Profile Summary
-          </button>
+          </Link>
           <span className="text-border">|</span>
-          <button className="flex items-center gap-2 text-sm text-muted-foreground hover:text-primary transition-colors">
-            <RefreshCw size={16} />
+          <button
+            type="button"
+            onClick={handleStartNewSession}
+            disabled={!authReady || isCreatingNew}
+            className="flex items-center gap-2 text-sm text-muted-foreground hover:text-primary transition-colors disabled:opacity-50"
+          >
+            {isCreatingNew ? (
+              <Loader2 size={16} className="animate-spin" />
+            ) : (
+              <RefreshCw size={16} />
+            )}
             Start a New Career Session
           </button>
         </div>

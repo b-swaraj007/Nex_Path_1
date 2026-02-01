@@ -28,6 +28,33 @@ export interface PsychometricProfile {
   completedAt: unknown // Firestore Timestamp
 }
 
+/** Canonical backend→UI psychometric contract (Firestore + API response) */
+export interface PsychometricCRI {
+  score: number
+  max: number
+  band: string
+  summary: string
+  disclaimer: string
+}
+
+export interface PsychometricParameterStored {
+  score: number
+  max: number
+  status: "active" | "removed"
+  interpretation: string
+}
+
+export type PsychometricParametersStored = Record<string, PsychometricParameterStored>
+
+export interface PsychometricProfileStored {
+  CRI: PsychometricCRI
+  parameters: PsychometricParametersStored
+  userCorrections?: Record<string, string>
+  removedInsights?: string[]
+  rawAnswers?: Record<string, number>
+  completedAt: unknown
+}
+
 export interface ChatMessage {
   id: string
   role: "user" | "assistant" | "system"

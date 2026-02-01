@@ -3,6 +3,9 @@
 import React, { useState, useRef, useEffect } from "react"
 import { useRouter } from "next/navigation"
 import Link from "next/link"
+import { onAuthStateChanged } from "firebase/auth"
+import { auth, submitPsychometric, updatePsychometricCorrections, createPsychometricChatSession, getCallableErrorMessage } from "@/lib/firebase"
+import type { PsychometricResult } from "@/lib/firebase"
 import { Button } from "@/components/ui/button"
 import {
   Brain,
@@ -20,6 +23,7 @@ import {
   Eye,
   Compass,
   Shield,
+  Loader2,
 } from "lucide-react"
 
 // Types
@@ -40,12 +44,22 @@ interface Section {
 }
 
 interface InsightCard {
-  id: string
-  parameter: string
+  id: string // section key e.g. logical_reasoning
+  parameter: string // display name
   score: number
   interpretation: string
   visible: boolean
   userNote?: string
+}
+
+const SECTION_KEY_TO_DISPLAY: Record<string, string> = {
+  logical_reasoning: "Logical Reasoning",
+  verbal_reasoning: "Verbal Reasoning",
+  learning_adaptability: "Learning Adaptability",
+  problem_solving_speed: "Problem-Solving Speed",
+  curiosity_openness: "Curiosity & Openness",
+  persistence_grit: "Persistence & Grit",
+  attention_focus: "Attention & Focus",
 }
 
 // Question Data - 7 Sections with 5 questions each
@@ -578,10 +592,23 @@ export default function PsychometricTestPage() {
   const [currentQuestion, setCurrentQuestion] = useState(0)
   const [answers, setAnswers] = useState<Record<number, number>>({})
   const [showResults, setShowResults] = useState(false)
-  const [insights, setInsights] = useState<InsightCard[]>([])
+  const [psychometricResult, setPsychometricResult] = useState<PsychometricResult | null>(null)
+  const [insights, setInsights] = useState<InsightCard[]>([]) // legacy fallback
   const [isVisible, setIsVisible] = useState(false)
   const [addingNote, setAddingNote] = useState<string | null>(null)
   const [noteText, setNoteText] = useState("")
+  const [submitLoading, setSubmitLoading] = useState(false)
+  const [submitError, setSubmitError] = useState<string | null>(null)
+  const [continueLoading, setContinueLoading] = useState(false)
+  const [updateLoading, setUpdateLoading] = useState<string | null>(null) // id when updating corrections/remove
+
+  // Auth: redirect if not signed in when on results or when submitting
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (user) => {
+      if (!user && showResults) router.replace("/auth")
+    })
+    return () => unsub()
+  }, [showResults, router])
 
   // Calculate progress
   const totalQuestions = 35
@@ -683,18 +710,33 @@ export default function PsychometricTestPage() {
   }
 
   // Navigation
-  const goNext = () => {
+  const goNext = async () => {
     if (currentQuestion < section.questions.length - 1) {
       setCurrentQuestion((prev) => prev + 1)
     } else if (currentSection < sections.length - 1) {
       setCurrentSection((prev) => prev + 1)
       setCurrentQuestion(0)
     } else {
-      // Submit assessment
-      const scores = calculateScores()
-      const generatedInsights = generateInsights(scores)
-      setInsights(generatedInsights)
-      setShowResults(true)
+      // Submit assessment to backend
+      if (!auth.currentUser) {
+        router.replace("/auth")
+        return
+      }
+      setSubmitLoading(true)
+      setSubmitError(null)
+      const answersForApi: Record<string, number> = {}
+      Object.entries(answers).forEach(([k, v]) => {
+        answersForApi[String(k)] = v
+      })
+      try {
+        const result = await submitPsychometric(answersForApi)
+        setPsychometricResult(result)
+        setShowResults(true)
+      } catch (err: unknown) {
+        setSubmitError(getCallableErrorMessage(err))
+      } finally {
+        setSubmitLoading(false)
+      }
     }
   }
 
@@ -707,44 +749,103 @@ export default function PsychometricTestPage() {
     }
   }
 
-  // Remove insight
-  const removeInsight = (id: string) => {
-    setInsights((prev) =>
-      prev.map((insight) =>
-        insight.id === id ? { ...insight, visible: false } : insight
+  // Remove insight (persist to backend)
+  const removeInsight = async (id: string) => {
+    if (!psychometricResult || updateLoading) return
+    setUpdateLoading(id)
+    try {
+      const updated = await updatePsychometricCorrections(
+        undefined,
+        [...(psychometricResult.removedInsights || []), id]
       )
-    )
+      setPsychometricResult(updated)
+    } catch (err) {
+      console.error("Failed to remove insight:", err)
+    } finally {
+      setUpdateLoading(null)
+    }
   }
 
-  // Restore insight
-  const restoreInsight = (id: string) => {
-    setInsights((prev) =>
-      prev.map((insight) =>
-        insight.id === id ? { ...insight, visible: false } : insight
+  // Restore insight (persist to backend)
+  const restoreInsight = async (id: string) => {
+    if (!psychometricResult || updateLoading) return
+    setUpdateLoading(id)
+    try {
+      const updated = await updatePsychometricCorrections(
+        undefined,
+        (psychometricResult.removedInsights || []).filter((x) => x !== id)
       )
-    )
+      setPsychometricResult(updated)
+    } catch (err) {
+      console.error("Failed to restore insight:", err)
+    } finally {
+      setUpdateLoading(null)
+    }
   }
 
-  // Add note to insight
-  const addNoteToInsight = (id: string) => {
-    setInsights((prev) =>
-      prev.map((insight) =>
-        insight.id === id ? { ...insight, userNote: noteText } : insight
+  // Add note / correction (persist to backend)
+  const addNoteToInsight = async (id: string) => {
+    if (!psychometricResult || updateLoading) return
+    setUpdateLoading(id)
+    try {
+      const updated = await updatePsychometricCorrections(
+        { ...psychometricResult.userCorrections, [id]: noteText },
+        undefined
       )
-    )
-    setAddingNote(null)
-    setNoteText("")
+      setPsychometricResult(updated)
+      setAddingNote(null)
+      setNoteText("")
+    } catch (err) {
+      console.error("Failed to save note:", err)
+    } finally {
+      setUpdateLoading(null)
+    }
   }
 
-  // Continue to chat
-  const continueToChat = () => {
-    // In a real app, store insights in context/state management
-    router.push("/chat")
+  // Continue to chat (create session with profile synthesis and redirect)
+  const continueToChat = async () => {
+    if (!auth.currentUser || continueLoading) return
+    setContinueLoading(true)
+    try {
+      const { sessionId } = await createPsychometricChatSession()
+      router.push(`/chat?sessionId=${sessionId}`)
+    } catch (err) {
+      console.error("Failed to start chat:", err)
+      setContinueLoading(false)
+    }
   }
 
-  const scores = showResults ? calculateScores() : {}
-  const cri = showResults ? calculateCRI(scores) : 0
-  const criInterpretation = getCRIInterpretation(cri)
+  // Derive CRI and insights from API result (or legacy local)
+  const scores = showResults && !psychometricResult ? calculateScores() : {}
+  const cri = psychometricResult?.CRI?.score ?? (showResults ? calculateCRI(scores) : 0)
+  const criInterpretation = psychometricResult?.CRI
+    ? {
+        band: psychometricResult.CRI.band,
+        description: psychometricResult.CRI.summary,
+        color: "text-primary",
+      }
+    : getCRIInterpretation(cri)
+
+  const activeInsights: InsightCard[] = psychometricResult
+    ? Object.entries(psychometricResult.parameters || {})
+        .filter(([, p]) => p.status !== "removed")
+        .map(([id, p]) => ({
+          id,
+          parameter: SECTION_KEY_TO_DISPLAY[id] || id.replace(/_/g, " "),
+          score: p.score,
+          interpretation: psychometricResult.userCorrections?.[id] ?? p.interpretation,
+          visible: true,
+          userNote: psychometricResult.userCorrections?.[id],
+        }))
+    : insights
+
+  const removedInsightKeys = psychometricResult?.removedInsights || []
+  const removedInsightCards = psychometricResult
+    ? removedInsightKeys.map((id) => ({
+        id,
+        parameter: SECTION_KEY_TO_DISPLAY[id] || id.replace(/_/g, " "),
+      }))
+    : insights.filter((i) => !i.visible).map((i) => ({ id: i.id, parameter: i.parameter }))
 
   return (
     <div
@@ -904,6 +1005,18 @@ export default function PsychometricTestPage() {
               </div>
             </div>
 
+            {/* Submit error (shown when submit fails while still on question view) */}
+            {submitError && (
+              <div className="mb-6 p-4 rounded-xl bg-destructive/10 border border-destructive/30 text-destructive text-sm flex items-start gap-3">
+                <AlertCircle size={20} className="flex-shrink-0 mt-0.5" />
+                <div>
+                  <p className="font-medium">Submission failed</p>
+                  <p className="mt-1">{submitError}</p>
+                  <p className="mt-2 text-destructive/80 text-xs">Check your connection and try again, or sign in and retry.</p>
+                </div>
+              </div>
+            )}
+
             {/* Question Card */}
             <div
               className={`relative rounded-2xl overflow-hidden border border-border/50 bg-card/30 backdrop-blur-xl p-8 mb-6 transition-all duration-700 delay-200 ${
@@ -976,15 +1089,24 @@ export default function PsychometricTestPage() {
               </Button>
 
               <Button
-                onClick={goNext}
-                disabled={answers[question?.id] === undefined}
+                onClick={() => void goNext()}
+                disabled={answers[question?.id] === undefined || submitLoading}
                 className="bg-primary text-primary-foreground hover:bg-primary/90 gap-2"
               >
-                {currentSection === sections.length - 1 &&
-                currentQuestion === section.questions.length - 1
-                  ? "Submit Assessment"
-                  : "Next"}
-                <ChevronRight size={18} />
+                {submitLoading ? (
+                  <>
+                    <Loader2 size={18} className="animate-spin" />
+                    Submitting…
+                  </>
+                ) : (
+                  <>
+                    {currentSection === sections.length - 1 &&
+                    currentQuestion === section.questions.length - 1
+                      ? "Submit Assessment"
+                      : "Next"}
+                    <ChevronRight size={18} />
+                  </>
+                )}
               </Button>
             </div>
           </>
@@ -1031,30 +1153,39 @@ export default function PsychometricTestPage() {
                       className="text-muted-foreground mt-0.5 shrink-0"
                     />
                     <p className="text-sm text-muted-foreground">
-                      CRI is an AI-estimated reasoning indicator, not a clinical
-                      IQ score.
+                      {psychometricResult?.CRI?.disclaimer ??
+                        "CRI is an AI-estimated reasoning indicator, not a clinical IQ score."}
                     </p>
                   </div>
                 </div>
               </div>
             </div>
 
+            {submitError && (
+              <div className="p-4 rounded-xl bg-destructive/10 border border-destructive/30 text-destructive text-sm">
+                {submitError}
+              </div>
+            )}
+
             {/* Insight Cards */}
             <div className="grid md:grid-cols-2 gap-4">
-              {insights.map(
-                (insight) =>
-                  insight.visible && (
+              {activeInsights.map((insight) => (
                     <div
                       key={insight.id}
                       className="relative rounded-xl overflow-hidden border border-border/50 bg-card/30 backdrop-blur-xl p-6 group"
                     >
                       {/* Remove button */}
                       <button
-                        onClick={() => removeInsight(insight.id)}
-                        className="absolute top-4 right-4 w-6 h-6 rounded-full bg-secondary/50 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity hover:bg-destructive/20"
+                        onClick={() => void removeInsight(insight.id)}
+                        disabled={!!updateLoading}
+                        className="absolute top-4 right-4 w-6 h-6 rounded-full bg-secondary/50 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity hover:bg-destructive/20 disabled:opacity-50"
                         title="Remove this insight"
                       >
-                        <X size={14} className="text-muted-foreground" />
+                        {updateLoading === insight.id ? (
+                          <Loader2 size={14} className="animate-spin text-muted-foreground" />
+                        ) : (
+                          <X size={14} className="text-muted-foreground" />
+                        )}
                       </button>
 
                       {/* Header */}
@@ -1117,10 +1248,15 @@ export default function PsychometricTestPage() {
                           <div className="flex gap-2">
                             <Button
                               size="sm"
-                              onClick={() => addNoteToInsight(insight.id)}
+                              onClick={() => void addNoteToInsight(insight.id)}
+                              disabled={!!updateLoading}
                               className="bg-primary text-primary-foreground"
                             >
-                              Save Note
+                              {updateLoading === insight.id ? (
+                                <Loader2 size={14} className="animate-spin" />
+                              ) : (
+                                "Save Note"
+                              )}
                             </Button>
                             <Button
                               size="sm"
@@ -1145,28 +1281,26 @@ export default function PsychometricTestPage() {
                         </button>
                       )}
                     </div>
-                  )
-              )}
+              ))}
             </div>
 
             {/* Removed insights notice */}
-            {insights.some((i) => !i.visible) && (
+            {removedInsightCards.length > 0 && (
               <div className="p-4 rounded-xl bg-secondary/30 border border-border/30">
                 <p className="text-sm text-muted-foreground mb-2">
                   Removed insights (AI will not consider these):
                 </p>
                 <div className="flex flex-wrap gap-2">
-                  {insights
-                    .filter((i) => !i.visible)
-                    .map((insight) => (
-                      <button
-                        key={insight.id}
-                        onClick={() => restoreInsight(insight.id)}
-                        className="px-3 py-1 rounded-full bg-secondary/50 text-sm text-muted-foreground hover:text-foreground transition-colors"
-                      >
-                        {insight.parameter} - Restore
-                      </button>
-                    ))}
+                  {removedInsightCards.map(({ id, parameter }) => (
+                    <button
+                      key={id}
+                      onClick={() => void restoreInsight(id)}
+                      disabled={!!updateLoading}
+                      className="px-3 py-1 rounded-full bg-secondary/50 text-sm text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+                    >
+                      {parameter} - Restore
+                    </button>
+                  ))}
                 </div>
               </div>
             )}
@@ -1175,14 +1309,24 @@ export default function PsychometricTestPage() {
             <div className="flex justify-center pt-4">
               <Button
                 size="lg"
-                onClick={continueToChat}
+                onClick={() => void continueToChat()}
+                disabled={continueLoading}
                 className="bg-primary text-primary-foreground hover:bg-primary/90 font-medium px-10 py-6 text-lg gap-2 group"
               >
-                Continue to Career Guidance
-                <ArrowRight
-                  size={20}
-                  className="group-hover:translate-x-1 transition-transform"
-                />
+                {continueLoading ? (
+                  <>
+                    <Loader2 size={20} className="animate-spin" />
+                    Starting…
+                  </>
+                ) : (
+                  <>
+                    Continue to Career Guidance
+                    <ArrowRight
+                      size={20}
+                      className="group-hover:translate-x-1 transition-transform"
+                    />
+                  </>
+                )}
               </Button>
             </div>
           </div>

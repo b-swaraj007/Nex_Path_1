@@ -4,4 +4,5 @@
  */
 
 import "./admin" // Initialize Firebase Admin first
-export { sendChatMessage, createChatSession, getChatSessions } from "./chat"
+export { sendChatMessage, createChatSession, createPsychometricChatSession, getChatSessions } from "./chat"
+export { submitPsychometric, updatePsychometricCorrections } from "./psychometric"

@@ -2,6 +2,10 @@
 
 import React, { useState, useEffect, useRef } from "react"
 import Link from "next/link"
+import { useRouter } from "next/navigation"
+import { onAuthStateChanged } from "firebase/auth"
+import { auth, getUserProfile, getPsychometricProfile } from "@/lib/firebase"
+import type { PsychometricResult } from "@/lib/firebase"
 import { Button } from "@/components/ui/button"
 import {
   Download,
@@ -21,178 +25,166 @@ import {
   AlertCircle,
   Building,
   Calendar,
+  Loader2,
+  MessageSquare,
+  ArrowRight,
 } from "lucide-react"
 
-// Mock report data - would come from AI generation in production
-const reportData = {
-  generatedDate: "January 31, 2026",
-  userName: "Alex",
+const SECTION_KEY_TO_DISPLAY: Record<string, string> = {
+  logical_reasoning: "Logical Reasoning",
+  verbal_reasoning: "Verbal Reasoning",
+  learning_adaptability: "Learning Adaptability",
+  problem_solving_speed: "Problem-Solving Speed",
+  curiosity_openness: "Curiosity & Openness",
+  persistence_grit: "Persistence & Grit",
+  attention_focus: "Attention & Focus",
+}
+
+/** Default/placeholder report when no psychometric or chat data */
+const defaultReportData = {
+  generatedDate: new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" }),
+  userName: "",
   career: {
-    title: "Data Scientist",
-    field: "Technology & Analytics",
+    title: "—",
+    field: "—",
     explanation:
-      "Based on your strong logical reasoning abilities, high problem-solving speed, and natural curiosity for patterns and systems, Data Science emerges as an excellent career fit. Your cognitive profile shows you excel at abstract thinking and have the persistence needed for complex analytical challenges. This role will leverage your strengths while providing continuous intellectual stimulation.",
+      "Generate career roadmap in a chat session first to get it displayed in this report. Go to Career Chat from the dashboard, discuss your goals and preferred role, and ask for a roadmap and action plan.",
   },
   psychometricProfile: {
-    cri: 134,
-    criInterpretation:
-      "Your CRI of 134 places you in the top 15% of analytical thinkers. This indicates strong potential for careers requiring complex reasoning and data interpretation.",
-    parameters: [
-      {
-        name: "Logical Reasoning",
-        score: 87,
-        interpretation: "Exceptional ability to identify patterns and draw logical conclusions",
-      },
-      {
-        name: "Verbal Reasoning",
-        score: 72,
-        interpretation: "Strong communication skills with room for technical writing improvement",
-      },
-      {
-        name: "Learning Adaptability",
-        score: 81,
-        interpretation: "Quick to acquire new concepts and adapt to changing requirements",
-      },
-      {
-        name: "Problem-Solving Speed",
-        score: 79,
-        interpretation: "Efficient at breaking down complex problems into manageable parts",
-      },
-      {
-        name: "Curiosity & Openness",
-        score: 91,
-        interpretation: "Highly motivated to explore new ideas and approaches",
-      },
-      {
-        name: "Persistence & Grit",
-        score: 76,
-        interpretation: "Good perseverance with occasional need for external motivation",
-      },
-      {
-        name: "Attention & Focus",
-        score: 83,
-        interpretation: "Strong sustained attention suitable for detailed analytical work",
-      },
-    ],
+    cri: 0,
+    criInterpretation: "Complete the psychometric assessment to see your Cognitive Reasoning Index and interpretation.",
+    parameters: [] as Array<{ name: string; score: number; interpretation: string }>,
   },
   careerFit: {
-    strengths: [
-      "Strong analytical and logical thinking aligns perfectly with data analysis requirements",
-      "High curiosity drives continuous learning in a rapidly evolving field",
-      "Problem-solving efficiency supports complex model development",
-      "Good attention to detail ensures accuracy in data interpretation",
-    ],
-    challenges: [
-      "May need to develop patience for stakeholder communication",
-      "Technical writing skills could benefit from focused improvement",
-      "Consider building tolerance for repetitive data cleaning tasks",
-    ],
+    strengths: ["Generate career roadmap in chat session first to get it displayed in this report."],
+    challenges: ["Then return here to see strengths and growth areas."],
     workEnvironment:
-      "You would thrive in environments that offer intellectual challenges, autonomy in problem-solving, and opportunities for continuous learning. Consider roles in tech companies, research institutions, or consulting firms that value analytical depth over routine tasks.",
+      "Generate career roadmap in a chat session first to get work environment recommendations in this report.",
   },
   marketOutlook: {
-    currentDemand: "Very High",
-    futureTrend: "Strong Growth Expected",
-    trendDescription:
-      "Data Science roles are projected to grow 35% over the next decade, driven by AI adoption and data-driven decision making across industries.",
-    safetyScore: 78,
-    safetyNote:
-      "While automation may handle routine analysis, complex problem-solving and strategic interpretation roles remain secure.",
+    currentDemand: "—",
+    futureTrend: "—",
+    trendDescription: "Generate career roadmap in chat session first to get market outlook and safety insights here.",
+    safetyScore: 0,
+    safetyNote: "Discuss your target role in Career Chat for a personalized safety note.",
   },
   roadmap: [
     {
-      phase: "Foundation Building",
-      duration: "0-6 months",
-      skills: ["Python Programming", "Statistics & Probability", "SQL & Database Fundamentals"],
-      subjects: ["Mathematics", "Computer Science Basics"],
-      difficulty: "Moderate",
-      masteryTarget: 80,
-    },
-    {
-      phase: "Core Competencies",
-      duration: "6-12 months",
-      skills: ["Machine Learning Fundamentals", "Data Visualization", "Feature Engineering"],
-      subjects: ["Linear Algebra", "Calculus", "Statistical Modeling"],
-      difficulty: "Challenging",
-      masteryTarget: 75,
-    },
-    {
-      phase: "Specialization",
-      duration: "12-18 months",
-      skills: ["Deep Learning", "Natural Language Processing", "Big Data Technologies"],
-      subjects: ["Neural Networks", "Cloud Computing", "MLOps"],
-      difficulty: "Advanced",
-      masteryTarget: 70,
-    },
-    {
-      phase: "Professional Readiness",
-      duration: "18-24 months",
-      skills: ["End-to-End ML Projects", "Business Communication", "Domain Expertise"],
-      subjects: ["Industry Applications", "Ethics in AI", "Project Management"],
-      difficulty: "Professional",
-      masteryTarget: 85,
+      phase: "Generate career roadmap in chat first",
+      duration: "—",
+      skills: ["Go to Career Chat, discuss your goals and preferred role, and ask for a roadmap and action plan. Then this section will show your personalized roadmap."],
+      subjects: ["—"],
+      difficulty: "—",
+      masteryTarget: 0,
     },
   ],
-  certifications: [
-    {
-      name: "Professional Data Science Certificate",
-      provider: "Major University Online Platform",
-      importance: "High",
-    },
-    {
-      name: "Machine Learning Specialization",
-      provider: "Leading Tech Company",
-      importance: "High",
-    },
-    {
-      name: "Cloud Data Engineering Certificate",
-      provider: "Cloud Platform Provider",
-      importance: "Medium",
-    },
-    {
-      name: "Statistical Analysis Professional",
-      provider: "Industry Association",
-      importance: "Medium",
-    },
-  ],
-  resources: [
-    "Interactive coding platforms for Python and SQL practice",
-    "Open-source datasets for portfolio projects",
-    "Online communities for peer learning and networking",
-    "Technical blogs and research paper repositories",
-  ],
+  certifications: [] as Array<{ name: string; provider: string; importance: string }>,
+  resources: ["Generate career roadmap in chat session first to get recommended resources in this report."],
   actionPlan: [
-    {
-      category: "Immediate (Week 1-2)",
-      items: [
-        "Set up Python development environment",
-        "Enroll in introductory statistics course",
-        "Join 2-3 data science communities online",
-      ],
-    },
-    {
-      category: "Short-term (Month 1-2)",
-      items: [
-        "Complete Python basics and start SQL fundamentals",
-        "Begin first small data analysis project",
-        "Schedule weekly learning blocks (minimum 10 hours/week)",
-      ],
-    },
-    {
-      category: "Exploration (Month 2-3)",
-      items: [
-        "Attend virtual data science meetups",
-        "Research companies and roles that interest you",
-        "Start building your portfolio website",
-      ],
-    },
+    { category: "Next step", items: ["Go to Career Chat and generate your career roadmap first; then your action plan will appear here."] },
   ],
 }
 
+export type ReportData = typeof defaultReportData
+
+/** True when career/roadmap sections are still placeholders (not yet generated from chat). */
+function isPlaceholderCareerRoadmap(data: ReportData): boolean {
+  const defaultCareerTitle = "—"
+  const placeholderPhase = "Generate career roadmap in chat first"
+  const hasPlaceholderCareer = data.career.title === defaultCareerTitle
+  const hasPlaceholderRoadmap =
+    data.roadmap.length === 1 &&
+    data.roadmap[0].phase === placeholderPhase
+  return hasPlaceholderCareer || hasPlaceholderRoadmap
+}
+
+function buildReportFromData(
+  userProfile: Record<string, unknown> | null,
+  psychometric: PsychometricResult | null
+): ReportData {
+  const generatedDate = new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })
+  const userName = (userProfile?.displayName as string) || (userProfile?.email as string) || "User"
+
+  if (!psychometric) {
+    return {
+      ...defaultReportData,
+      generatedDate,
+      userName,
+    }
+  }
+
+  const params = Object.entries(psychometric.parameters || {})
+    .filter(([, p]) => p.status !== "removed")
+    .map(([key, p]) => ({
+      name: SECTION_KEY_TO_DISPLAY[key] || key.replace(/_/g, " "),
+      score: p.max > 0 ? Math.round((p.score / p.max) * 100) : 0,
+      interpretation: psychometric.userCorrections?.[key] ?? p.interpretation,
+    }))
+
+  return {
+    ...defaultReportData,
+    generatedDate,
+    userName,
+    psychometricProfile: {
+      cri: psychometric.CRI?.score ?? 0,
+      criInterpretation: psychometric.CRI?.summary ?? psychometric.CRI?.disclaimer ?? defaultReportData.psychometricProfile.criInterpretation,
+      parameters: params,
+    },
+    career: {
+      ...defaultReportData.career,
+      title: psychometric.CRI?.band ? `CRI Band: ${psychometric.CRI.band}` : defaultReportData.career.title,
+      field: "Based on your assessment",
+      explanation: psychometric.CRI?.summary ?? defaultReportData.career.explanation,
+    },
+  }
+}
+
 export default function CareerReportPage() {
+  const router = useRouter()
+  const [authReady, setAuthReady] = useState(false)
+  const [userId, setUserId] = useState<string | null>(null)
+  const [reportData, setReportData] = useState<ReportData>(defaultReportData)
+  const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [isVisible, setIsVisible] = useState(false)
   const [visibleSections, setVisibleSections] = useState<Set<string>>(new Set())
+  const [downloading, setDownloading] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
+  const reportContentRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (user) => {
+      setAuthReady(true)
+      setUserId(user?.uid ?? null)
+    })
+    return () => unsub()
+  }, [])
+
+  useEffect(() => {
+    if (!authReady || !userId) {
+      if (authReady && !userId) {
+        router.replace("/auth")
+      }
+      return
+    }
+    let cancelled = false
+    setLoading(true)
+    setLoadError(null)
+    Promise.all([getUserProfile(userId), getPsychometricProfile(userId)])
+      .then(([userProfile, psychometric]) => {
+        if (cancelled) return
+        setReportData(buildReportFromData(userProfile ?? null, psychometric))
+      })
+      .catch((err) => {
+        if (!cancelled) setLoadError(err?.message ?? "Failed to load report data")
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [authReady, userId, router])
 
   useEffect(() => {
     setIsVisible(true)
@@ -231,6 +223,23 @@ export default function CareerReportPage() {
     }
   }
 
+  const handleDownloadPdf = () => {
+    setDownloading(true)
+    window.print()
+    setDownloading(false)
+  }
+
+  if (!authReady || loading) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="flex flex-col items-center gap-4">
+          <Loader2 className="h-8 w-8 animate-spin text-primary" />
+          <p className="text-muted-foreground">Loading your report…</p>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div
       ref={containerRef}
@@ -263,14 +272,19 @@ export default function CareerReportPage() {
       </div>
 
       {/* Content */}
-      <div className="relative z-10 max-w-4xl mx-auto px-4 py-8 md:py-12">
+      <div ref={reportContentRef} className="relative z-10 max-w-4xl mx-auto px-4 py-8 md:py-12">
+        {loadError && (
+          <div className="mb-6 p-4 rounded-xl bg-destructive/10 border border-destructive/30 text-destructive text-sm">
+            {loadError}
+          </div>
+        )}
         {/* Header */}
         <header
           className={`mb-12 transition-all duration-700 ${
             isVisible ? "opacity-100 translate-y-0" : "opacity-0 -translate-y-4"
           }`}
         >
-          <Link href="/dashboard" className="inline-block mb-6">
+          <Link href="/dashboard" className="inline-block mb-6 print:hidden">
             <span className="text-lg font-bold text-foreground">
               NexPath<span className="text-primary">.AI</span>
             </span>
@@ -297,6 +311,33 @@ export default function CareerReportPage() {
             </div>
           </div>
         </header>
+
+        {/* CTA when career roadmap not yet generated from chat */}
+        {isPlaceholderCareerRoadmap(reportData) && (
+          <div className="mb-8 rounded-2xl border border-primary/30 bg-primary/5 p-6 md:p-8 print:hidden">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
+              <div className="flex items-start gap-3 flex-1">
+                <div className="w-10 h-10 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center flex-shrink-0">
+                  <MessageSquare size={20} className="text-primary" />
+                </div>
+                <div>
+                  <h3 className="font-semibold text-foreground mb-1">
+                    Career roadmap not in this report yet
+                  </h3>
+                  <p className="text-sm text-muted-foreground">
+                    Generate your career roadmap in a chat session first to get it displayed here. Go to Career Chat, discuss your goals and preferred role, and ask for a roadmap and action plan—then return to this page to download a full report.
+                  </p>
+                </div>
+              </div>
+              <Link href="/dashboard" className="flex-shrink-0">
+                <Button className="gap-2 bg-primary text-primary-foreground hover:bg-primary/90">
+                  Go to Career Chat
+                  <ArrowRight size={16} />
+                </Button>
+              </Link>
+            </div>
+          </div>
+        )}
 
         {/* Section 1: Career Summary */}
         <section
@@ -798,22 +839,24 @@ export default function CareerReportPage() {
 
         {/* Download & Share Actions */}
         <section
-          className={`transition-all duration-700 delay-500 ${
+          className={`transition-all duration-700 delay-500 print:hidden ${
             isVisible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-8"
           }`}
         >
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
             <Button
               size="lg"
-              className="bg-gradient-to-r from-primary to-primary/80 text-primary-foreground hover:from-primary/90 hover:to-primary/70 font-medium px-8 py-6 text-base gap-2 w-full sm:w-auto"
+              disabled={downloading}
+              onClick={handleDownloadPdf}
+              className="bg-gradient-to-r from-primary to-primary/80 text-primary-foreground hover:from-primary/90 hover:to-primary/70 font-medium px-8 py-6 text-base gap-2 w-full sm:w-auto print:hidden"
             >
-              <Download size={18} />
-              Download PDF Report
+              {downloading ? <Loader2 size={18} className="animate-spin" /> : <Download size={18} />}
+              {downloading ? "Preparing…" : "Download PDF Report"}
             </Button>
             <Button
               variant="outline"
               size="lg"
-              className="bg-transparent border-border/50 text-foreground hover:bg-primary/10 hover:border-primary/50 font-medium px-8 py-6 text-base gap-2 w-full sm:w-auto"
+              className="bg-transparent border-border/50 text-foreground hover:bg-primary/10 hover:border-primary/50 font-medium px-8 py-6 text-base gap-2 w-full sm:w-auto print:hidden"
             >
               <Save size={18} />
               Save to Profile
@@ -822,7 +865,7 @@ export default function CareerReportPage() {
         </section>
 
         {/* Back Link */}
-        <div className="mt-8 text-center">
+        <div className="mt-8 text-center print:hidden">
           <Link
             href="/dashboard"
             className="text-sm text-muted-foreground hover:text-primary transition-colors"

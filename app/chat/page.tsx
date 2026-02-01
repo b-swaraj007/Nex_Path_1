@@ -2,6 +2,10 @@
 
 import React, { useState, useRef, useEffect } from "react"
 import Link from "next/link"
+import { useRouter, useSearchParams } from "next/navigation"
+import { onAuthStateChanged } from "firebase/auth"
+import { auth, getChatSessions, createChatSession } from "@/lib/firebase"
+import { useChatFirestore } from "@/hooks/useChatFirestore"
 import { Button } from "@/components/ui/button"
 import {
   Plus,
@@ -21,12 +25,12 @@ import {
   TrendingUp,
   BookOpen,
   Map,
-  ArrowRight,
   User,
   MoreVertical,
   Clock,
   Download,
   FileText,
+  Loader2,
 } from "lucide-react"
 
 // Types
@@ -38,11 +42,10 @@ interface Message {
   isTyping?: boolean
 }
 
-interface ChatSession {
+interface SessionMeta {
   id: string
   title: string
   lastUpdated: Date
-  messages: Message[]
   hasAssessment: boolean
 }
 
@@ -52,7 +55,6 @@ interface CareerSuggestion {
   description: string
 }
 
-// Mock data for career domains
 const careerDomains: CareerSuggestion[] = [
   { domain: "Technology", icon: <Brain size={20} />, description: "Software, AI, Data Science, Cybersecurity" },
   { domain: "Healthcare", icon: <Target size={20} />, description: "Medicine, Nursing, Research, Public Health" },
@@ -62,47 +64,144 @@ const careerDomains: CareerSuggestion[] = [
   { domain: "Science", icon: <TrendingUp size={20} />, description: "Research, Engineering, Environmental Science" },
 ]
 
-// Mock psychometric profile
-const mockPsychometricProfile = {
-  cri: 128,
-  strengths: ["Pattern recognition", "Abstract reasoning", "Analytical thinking"],
-  learningStyle: "Visual-conceptual learner with strong self-directed tendencies",
-  workPreference: "Prefers independent problem-solving with collaborative checkpoints",
-  reasoning: "Excels at breaking down complex problems into logical steps",
+function toDate(v: unknown): Date {
+  if (!v) return new Date()
+  if (v instanceof Date) return v
+  const o = v as { seconds?: number; _seconds?: number }
+  const sec = o.seconds ?? o._seconds
+  if (typeof sec === "number") return new Date(sec * 1000)
+  return new Date()
 }
 
 export default function ChatPage() {
-  const [sessions, setSessions] = useState<ChatSession[]>([
-    {
-      id: "1",
-      title: "Career Exploration Session",
-      lastUpdated: new Date(Date.now() - 3600000),
-      messages: [],
-      hasAssessment: true,
-    },
-  ])
-  const [activeSessionId, setActiveSessionId] = useState<string>("1")
+  const router = useRouter()
+  const searchParams = useSearchParams()
+  const sessionIdFromUrl = searchParams.get("sessionId")
+
+  const [userId, setUserId] = useState<string | null>(null)
+  const [sessions, setSessions] = useState<SessionMeta[]>([])
+  const [activeSessionId, setActiveSessionId] = useState<string>("")
+  const [sessionsLoading, setSessionsLoading] = useState(true)
   const [inputMessage, setInputMessage] = useState("")
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null)
   const [editingTitle, setEditingTitle] = useState("")
-  const [isTyping, setIsTyping] = useState(false)
-  const [hasShownIntro, setHasShownIntro] = useState(false)
   const [selectedDomain, setSelectedDomain] = useState<string | null>(null)
   const [showDomainSelector, setShowDomainSelector] = useState(false)
   const [showMenu, setShowMenu] = useState(false)
+  const [createSessionLoading, setCreateSessionLoading] = useState(false)
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
-  const activeSession = sessions.find((s) => s.id === activeSessionId)
+  const activeSessionMeta = sessions.find((s) => s.id === activeSessionId)
+  const hasAssessment = activeSessionMeta?.hasAssessment ?? false
 
-  // Auto-scroll to bottom
+  const {
+    messages,
+    isLoading: messagesLoading,
+    isSending,
+    error: sendError,
+    sendMessage: sendMessageToApi,
+  } = useChatFirestore({
+    userId,
+    sessionId: activeSessionId || null,
+    hasAssessment,
+  })
+
+  const activeSession = activeSessionMeta
+    ? { ...activeSessionMeta, messages }
+    : null
+
+  // Auth: redirect if not signed in
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (user) => {
+      setUserId(user?.uid ?? null)
+      if (!user) router.replace("/auth")
+    })
+    return () => unsub()
+  }, [router])
+
+  // Load sessions from Firestore (or use sessionId from URL if load fails)
+  useEffect(() => {
+    if (!userId) {
+      setSessionsLoading(false)
+      return
+    }
+    setSessionsLoading(true)
+    getChatSessions()
+      .then((data) => {
+        const list: SessionMeta[] = (data.sessions || []).map((s: { id: string; title: string; lastUpdated: unknown; hasAssessment: boolean }) => ({
+          id: s.id,
+          title: s.title || "Untitled",
+          lastUpdated: toDate(s.lastUpdated),
+          hasAssessment: Boolean(s.hasAssessment),
+        }))
+        const urlIdInList = sessionIdFromUrl && list.some((x) => x.id === sessionIdFromUrl)
+        const finalList: SessionMeta[] =
+          sessionIdFromUrl && !list.some((x) => x.id === sessionIdFromUrl)
+            ? [{ id: sessionIdFromUrl, title: "Career Session", lastUpdated: new Date(), hasAssessment: false }, ...list]
+            : list
+        setSessions(finalList)
+        const idToUse = urlIdInList ? sessionIdFromUrl : (finalList[0]?.id ?? sessionIdFromUrl ?? null)
+        if (idToUse) {
+          setActiveSessionId(idToUse)
+          router.replace(`/chat?sessionId=${idToUse}`)
+        }
+      })
+      .catch((err) => {
+        console.error("Failed to load sessions:", err)
+        // If we have sessionId in URL (e.g. just came from dashboard), still open that session
+        if (sessionIdFromUrl) {
+          setSessions([{ id: sessionIdFromUrl, title: "Career Session", lastUpdated: new Date(), hasAssessment: false }])
+          setActiveSessionId(sessionIdFromUrl)
+        } else {
+          setSessions([])
+        }
+      })
+      .finally(() => setSessionsLoading(false))
+  }, [userId, sessionIdFromUrl])
+
+  // Sync activeSessionId from URL when it changes (e.g. browser back)
+  useEffect(() => {
+    if (sessionIdFromUrl && sessionIdFromUrl !== activeSessionId) {
+      setActiveSessionId(sessionIdFromUrl)
+    }
+  }, [sessionIdFromUrl])
+
+  // When we have no session and sessions are loaded: create one and redirect (skip if URL has sessionId — we're opening that session)
+  useEffect(() => {
+    if (!userId || sessionsLoading || createSessionLoading) return
+    if (sessions.length > 0) return
+    if (activeSessionId) return
+    if (sessionIdFromUrl) return
+    setCreateSessionLoading(true)
+    createChatSession("New Career Session", false)
+      .then(({ sessionId }) => {
+        router.replace(`/chat?sessionId=${sessionId}`)
+        setActiveSessionId(sessionId)
+        setSessions([{ id: sessionId, title: "New Career Session", lastUpdated: new Date(), hasAssessment: false }])
+      })
+      .catch((err) => {
+        console.error("Failed to create session:", err)
+        setCreateSessionLoading(false)
+      })
+      .finally(() => setCreateSessionLoading(false))
+  }, [userId, sessionsLoading, sessions.length, activeSessionId, sessionIdFromUrl, createSessionLoading, router])
+
+  // Auto-scroll to bottom when messages change
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
-  }, [activeSession?.messages])
+  }, [messages])
+
+  // Show domain selector when session has assessment and no messages yet
+  useEffect(() => {
+    if (hasAssessment && messages.length === 0 && !showDomainSelector) {
+      setShowDomainSelector(true)
+    }
+  }, [hasAssessment, messages.length, showDomainSelector])
 
   // Close menu when clicking outside
   useEffect(() => {
@@ -115,77 +214,35 @@ export default function ChatPage() {
     return () => document.removeEventListener("mousedown", handleClickOutside)
   }, [])
 
-  // Show intro message on first load
-  useEffect(() => {
-    if (!hasShownIntro && activeSession && activeSession.messages.length === 0) {
-      const introMessage: Message = activeSession.hasAssessment
-        ? {
-            id: "intro",
-            role: "system",
-            content: `Based on your psychometric assessment, here's what I understand about you:
-
-**Cognitive Reasoning Index:** ${mockPsychometricProfile.cri}/160
-
-**Your Strengths:**
-${mockPsychometricProfile.strengths.map((s) => `- ${s}`).join("\n")}
-
-**Learning Style:** ${mockPsychometricProfile.learningStyle}
-
-**Work Preference:** ${mockPsychometricProfile.workPreference}
-
-**Reasoning Pattern:** ${mockPsychometricProfile.reasoning}
-
-I'll use this understanding to provide personalized career guidance. Let's explore what paths might be the best fit for you.`,
-            timestamp: new Date(),
-          }
-        : {
-            id: "intro",
-            role: "assistant",
-            content: `Welcome to NexPath.AI! I'm your AI Career Mentor.
-
-Let's understand your goals step by step. I'll ask a few questions if needed to provide you with the most relevant career guidance.
-
-To get started, could you tell me a bit about yourself? What are your interests, skills, or any career areas you've been curious about?`,
-            timestamp: new Date(),
-          }
-
-      setSessions((prev) =>
-        prev.map((s) =>
-          s.id === activeSessionId
-            ? { ...s, messages: [introMessage] }
-            : s
-        )
-      )
-      setHasShownIntro(true)
-
-      // Show domain selector after intro for users with assessment
-      if (activeSession.hasAssessment) {
-        setTimeout(() => setShowDomainSelector(true), 1000)
-      }
+  const createNewSession = async () => {
+    if (!userId || createSessionLoading) return
+    setCreateSessionLoading(true)
+    try {
+      const { sessionId } = await createChatSession("New Career Session", false)
+      setSessions((prev) => [
+        { id: sessionId, title: "New Career Session", lastUpdated: new Date(), hasAssessment: false },
+        ...prev,
+      ])
+      setActiveSessionId(sessionId)
+      setShowDomainSelector(false)
+      setSelectedDomain(null)
+      setMobileSidebarOpen(false)
+      router.replace(`/chat?sessionId=${sessionId}`)
+    } catch (err) {
+      console.error("Failed to create session:", err)
+    } finally {
+      setCreateSessionLoading(false)
     }
-  }, [activeSession, hasShownIntro, activeSessionId])
-
-  const createNewSession = () => {
-    const newSession: ChatSession = {
-      id: Date.now().toString(),
-      title: "New Career Session",
-      lastUpdated: new Date(),
-      messages: [],
-      hasAssessment: false,
-    }
-    setSessions((prev) => [newSession, ...prev])
-    setActiveSessionId(newSession.id)
-    setHasShownIntro(false)
-    setShowDomainSelector(false)
-    setSelectedDomain(null)
-    setMobileSidebarOpen(false)
   }
 
   const deleteSession = (id: string) => {
     setSessions((prev) => prev.filter((s) => s.id !== id))
-    if (activeSessionId === id && sessions.length > 1) {
+    if (activeSessionId === id) {
       const remaining = sessions.filter((s) => s.id !== id)
-      setActiveSessionId(remaining[0].id)
+      const next = remaining[0]?.id ?? ""
+      setActiveSessionId(next)
+      if (next) router.replace(`/chat?sessionId=${next}`)
+      else router.replace("/chat")
     }
   }
 
@@ -206,126 +263,38 @@ To get started, could you tell me a bit about yourself? What are your interests,
     setEditingTitle("")
   }
 
-  const handleDomainSelect = (domain: string) => {
+  const handleDomainSelect = async (domain: string) => {
     setSelectedDomain(domain)
     setShowDomainSelector(false)
-
-    // Add user message
-    const userMessage: Message = {
-      id: Date.now().toString(),
-      role: "user",
-      content: `I'm interested in exploring careers in ${domain}.`,
-      timestamp: new Date(),
+    try {
+      await sendMessageToApi(`I'm interested in exploring careers in ${domain}.`)
+    } catch {
+      // Error already surfaced by useChatFirestore
     }
-
-    setSessions((prev) =>
-      prev.map((s) =>
-        s.id === activeSessionId
-          ? { ...s, messages: [...s.messages, userMessage], lastUpdated: new Date() }
-          : s
-      )
-    )
-
-    // Simulate AI response
-    setIsTyping(true)
-    setTimeout(() => {
-      const aiResponse: Message = {
-        id: (Date.now() + 1).toString(),
-        role: "assistant",
-        content: `Excellent choice! ${domain} is a dynamic field with many exciting opportunities.
-
-Based on your cognitive profile, here are some specific paths within ${domain} that align well with your strengths:
-
-**High-Fit Roles:**
-- Data Scientist / ML Engineer (leverages your pattern recognition)
-- Product Manager (uses analytical + collaborative skills)
-- Research Scientist (matches your problem-solving approach)
-
-**Growth Areas to Consider:**
-- Cloud Architecture
-- AI/ML Specialization
-- Technical Leadership
-
-Would you like me to dive deeper into any of these roles? I can explain:
-- Day-to-day responsibilities
-- Required skills and learning paths
-- Industry demand and salary ranges
-- How your specific strengths apply`,
-        timestamp: new Date(),
-      }
-
-      setSessions((prev) =>
-        prev.map((s) =>
-          s.id === activeSessionId
-            ? { ...s, messages: [...s.messages, aiResponse], lastUpdated: new Date() }
-            : s
-        )
-      )
-      setIsTyping(false)
-    }, 2000)
   }
 
-  const sendMessage = () => {
-    if (!inputMessage.trim() || !activeSession) return
-
-    const userMessage: Message = {
-      id: Date.now().toString(),
-      role: "user",
-      content: inputMessage.trim(),
-      timestamp: new Date(),
-    }
-
-    setSessions((prev) =>
-      prev.map((s) =>
-        s.id === activeSessionId
-          ? { ...s, messages: [...s.messages, userMessage], lastUpdated: new Date() }
-          : s
-      )
-    )
-
+  const sendMessage = async () => {
+    const text = inputMessage.trim()
+    if (!text || !activeSessionId) return
     setInputMessage("")
-
-    // Simulate AI typing
-    setIsTyping(true)
-    setTimeout(() => {
-      const aiResponse: Message = {
-        id: (Date.now() + 1).toString(),
-        role: "assistant",
-        content: `Thank you for sharing that. Based on what you've told me, I can see a few interesting directions we could explore.
-
-Your interest aligns well with several career paths that combine analytical thinking with creative problem-solving. Let me break this down:
-
-**Key Observations:**
-- You seem drawn to roles that involve both independent work and meaningful collaboration
-- Your communication style suggests strong verbal reasoning abilities
-- You appear to value continuous learning and growth
-
-**Next Steps:**
-Would you like me to:
-1. Suggest specific job roles that match your profile?
-2. Create a skill development roadmap?
-3. Discuss industry trends and opportunities?
-
-Feel free to ask any questions or share more about your preferences.`,
-        timestamp: new Date(),
-      }
-
-      setSessions((prev) =>
-        prev.map((s) =>
-          s.id === activeSessionId
-            ? { ...s, messages: [...s.messages, aiResponse], lastUpdated: new Date() }
-            : s
-        )
-      )
-      setIsTyping(false)
-    }, 2500)
+    try {
+      await sendMessageToApi(text)
+    } catch {
+      // Error already surfaced
+    }
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault()
-      sendMessage()
+      void sendMessage()
     }
+  }
+
+  const setActiveSession = (id: string) => {
+    setActiveSessionId(id)
+    setMobileSidebarOpen(false)
+    router.replace(`/chat?sessionId=${id}`)
   }
 
   const formatTime = (date: Date) => {
@@ -597,39 +566,13 @@ Feel free to ask any questions or share more about your preferences.`,
     ${activeSession?.hasAssessment ? `
     <div class="section">
       <h2 class="section-title">Psychometric Profile Summary</h2>
-      <div style="display: flex; gap: 30px; align-items: flex-start;">
-        <div class="cri-score" style="flex-shrink: 0;">
-          <div class="score">${mockPsychometricProfile.cri}</div>
-          <div class="label">Cognitive Reasoning Index</div>
-          <div style="font-size: 11px; margin-top: 5px; opacity: 0.8;">out of 160</div>
-        </div>
-        <div style="flex: 1;">
-          <div class="profile-label">Key Strengths</div>
-          <ul class="strengths-list">
-            ${mockPsychometricProfile.strengths.map(s => `<li>${s}</li>`).join("")}
-          </ul>
-        </div>
-      </div>
-      <div class="profile-grid">
-        <div class="profile-item">
-          <div class="profile-label">Learning Style</div>
-          <div class="profile-value">${mockPsychometricProfile.learningStyle}</div>
-        </div>
-        <div class="profile-item">
-          <div class="profile-label">Work Preference</div>
-          <div class="profile-value">${mockPsychometricProfile.workPreference}</div>
-        </div>
-      </div>
-      <div class="profile-item">
-        <div class="profile-label">Reasoning Pattern</div>
-        <div class="profile-value">${mockPsychometricProfile.reasoning}</div>
-      </div>
+      <p class="subtitle">This session used your psychometric assessment for personalized guidance. See your full report on the Report page.</p>
     </div>
     ` : ""}
     
     <div class="section conversation-section">
       <h2 class="section-title">Conversation History</h2>
-      ${activeSession?.messages.map(msg => `
+      ${(activeSession?.messages ?? []).map((msg: Message) => `
         <div class="message ${msg.role}">
           <div class="message-role">${msg.role === "user" ? "You" : msg.role === "system" ? "Profile Synthesis" : "AI Career Mentor"}</div>
           <div class="message-content">${msg.content.replace(/\*\*/g, "").replace(/\n/g, "<br>")}</div>
@@ -724,14 +667,15 @@ Feel free to ask any questions or share more about your preferences.`,
         <div className={`p-3 ${!sidebarOpen && "lg:px-2"}`}>
           <Button
             onClick={createNewSession}
+            disabled={createSessionLoading}
             className={`
               w-full bg-primary text-primary-foreground hover:bg-primary/90
               font-medium gap-2 transition-all
               ${!sidebarOpen && "lg:px-0 lg:justify-center"}
             `}
           >
-            <Plus size={18} />
-            {sidebarOpen && <span>New Career Session</span>}
+            {createSessionLoading ? <Loader2 size={18} className="animate-spin" /> : <Plus size={18} />}
+            {sidebarOpen && <span>{createSessionLoading ? "Creating…" : "New Career Session"}</span>}
           </Button>
         </div>
 
@@ -750,10 +694,7 @@ Feel free to ask any questions or share more about your preferences.`,
                       : "hover:bg-sidebar-accent/50 border border-transparent"
                   }
                 `}
-                onClick={() => {
-                  setActiveSessionId(session.id)
-                  setMobileSidebarOpen(false)
-                }}
+                onClick={() => setActiveSession(session.id)}
               >
                 {editingSessionId === session.id ? (
                   <div className="flex items-center gap-2">
@@ -927,7 +868,28 @@ Feel free to ask any questions or share more about your preferences.`,
         {/* Messages Area */}
         <div className="flex-1 overflow-y-auto px-4 py-6">
           <div className="max-w-3xl mx-auto space-y-6">
-            {activeSession?.messages.map((message) => (
+            {!userId || sessionsLoading ? (
+              <div className="flex items-center justify-center py-20">
+                <Loader2 size={32} className="animate-spin text-primary" />
+                <span className="ml-3 text-muted-foreground">Loading sessions…</span>
+              </div>
+            ) : !activeSessionId && createSessionLoading ? (
+              <div className="flex items-center justify-center py-20">
+                <Loader2 size={32} className="animate-spin text-primary" />
+                <span className="ml-3 text-muted-foreground">Creating session…</span>
+              </div>
+            ) : messagesLoading && messages.length === 0 ? (
+              <div className="flex items-center justify-center py-20">
+                <Loader2 size={32} className="animate-spin text-primary" />
+                <span className="ml-3 text-muted-foreground">Loading chat…</span>
+              </div>
+            ) : messages.length === 0 && !showDomainSelector ? (
+              <div className="text-center py-12 px-4">
+                <p className="text-muted-foreground mb-2">Welcome to NexPath.AI</p>
+                <p className="text-sm text-muted-foreground">Type below to start your career conversation. The AI mentor will use your profile to guide you.</p>
+              </div>
+            ) : null}
+            {activeSession && messages.map((message) => (
               <div
                 key={message.id}
                 className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}
@@ -1021,7 +983,7 @@ Feel free to ask any questions or share more about your preferences.`,
             )}
 
             {/* Typing Indicator */}
-            {isTyping && (
+            {isSending && (
               <div className="flex justify-start">
                 <div className="bg-card/60 backdrop-blur-sm border border-border/50 rounded-2xl rounded-bl-md px-4 py-3">
                   <div className="flex items-center gap-2">
@@ -1041,7 +1003,7 @@ Feel free to ask any questions or share more about your preferences.`,
         </div>
 
         {/* Suggested Actions */}
-        {activeSession && activeSession.messages.length > 0 && !showDomainSelector && !isTyping && (
+        {activeSession && activeSession.messages.length > 0 && !showDomainSelector && !isSending && (
           <div className="px-4 py-2 border-t border-border/30">
             <div className="max-w-3xl mx-auto">
               <div className="flex flex-wrap gap-2">
@@ -1067,6 +1029,13 @@ Feel free to ask any questions or share more about your preferences.`,
           </div>
         )}
 
+        {/* Send error */}
+        {sendError && (
+          <div className="px-4 py-2 bg-destructive/10 border-b border-destructive/30 text-destructive text-sm text-center">
+            {sendError}
+          </div>
+        )}
+
         {/* Input Area */}
         <div className="p-4 border-t border-border bg-card/30 backdrop-blur-xl">
           <div className="max-w-3xl mx-auto">
@@ -1083,8 +1052,8 @@ Feel free to ask any questions or share more about your preferences.`,
                 style={{ minHeight: "40px" }}
               />
               <Button
-                onClick={sendMessage}
-                disabled={!inputMessage.trim() || isTyping}
+                onClick={() => void sendMessage()}
+                disabled={!inputMessage.trim() || isSending || !activeSessionId}
                 className="bg-primary text-primary-foreground hover:bg-primary/90
                   rounded-xl h-10 w-10 p-0 flex-shrink-0 transition-all
                   disabled:opacity-50 disabled:cursor-not-allowed"

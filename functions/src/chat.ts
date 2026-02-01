@@ -11,8 +11,8 @@ import { onCall, HttpsError } from "firebase-functions/v2/https"
 import { FieldValue } from "firebase-admin/firestore"
 import OpenAI from "openai"
 import { db } from "./admin"
-import { buildLLMContext } from "./contextBuilder"
-import type { UserProfile, PsychometricProfile, ChatMessage } from "./types"
+import { buildLLMContext, storedProfileToContextProfile } from "./contextBuilder"
+import type { UserProfile, PsychometricProfile, PsychometricProfileStored, ChatMessage } from "./types"
 
 const openaiApiKey = defineSecret("OPENAI_API_KEY")
 
@@ -142,7 +142,7 @@ export const sendChatMessage = onCall(
 
 /**
  * Callable: createChatSession
- * Creates a new chat session for the user.
+ * Creates a new chat session for the user. Does not use OpenAI.
  */
 export const createChatSession = onCall(
   {
@@ -150,25 +150,128 @@ export const createChatSession = onCall(
     region: "us-central1",
   },
   async (request) => {
+    try {
+      if (!request.auth) {
+        throw new HttpsError("unauthenticated", "User must be signed in")
+      }
+      const userId = request.auth.uid
+
+      const { title = "New Career Session", hasAssessment = false } =
+        (request.data as CreateSessionRequest) || {}
+
+      const sessionsRef = db.collection(`users/${userId}/chatSessions`)
+      const sessionRef = await sessionsRef.add({
+        title: typeof title === "string" ? title : "New Career Session",
+        lastUpdated: FieldValue.serverTimestamp(),
+        hasAssessment: Boolean(hasAssessment),
+      })
+
+      return {
+        sessionId: sessionRef.id,
+        title: typeof title === "string" ? title : "New Career Session",
+        hasAssessment: Boolean(hasAssessment),
+      }
+    } catch (err) {
+      if (err instanceof HttpsError) throw err
+      console.error("createChatSession error:", err)
+      const message = err instanceof Error ? err.message : "Failed to create chat session"
+      throw new HttpsError("internal", message)
+    }
+  }
+)
+
+/**
+ * Callable: createPsychometricChatSession
+ * Creates a session with hasAssessment: true and writes an initial "profile synthesis"
+ * assistant message so the user sees an in-depth summary when they land on chat.
+ */
+export const createPsychometricChatSession = onCall(
+  {
+    enforceAppCheck: false,
+    region: "us-central1",
+    secrets: [openaiApiKey],
+  },
+  async (request) => {
     if (!request.auth) {
       throw new HttpsError("unauthenticated", "User must be signed in")
     }
     const userId = request.auth.uid
+    const openai = new OpenAI({ apiKey: openaiApiKey.value() })
 
-    const { title = "New Career Session", hasAssessment = false } =
-      (request.data as CreateSessionRequest) || {}
-
+    const title = "Career Guidance (Psychometric)"
     const sessionsRef = db.collection(`users/${userId}/chatSessions`)
     const sessionRef = await sessionsRef.add({
-      title: typeof title === "string" ? title : "New Career Session",
+      title,
       lastUpdated: FieldValue.serverTimestamp(),
-      hasAssessment: Boolean(hasAssessment),
+      hasAssessment: true,
     })
+
+    const userDoc = await db.doc(`users/${userId}`).get()
+    const userProfile = userDoc.exists ? (userDoc.data() as UserProfile) : null
+    const psychometricSnap = await db.doc(`users/${userId}/psychometric/profile`).get()
+    const psychometricStored = psychometricSnap.exists
+      ? (psychometricSnap.data() as PsychometricProfileStored)
+      : null
+    const psychometricProfile = storedProfileToContextProfile(psychometricStored)
+
+    const profileSummary: string[] = []
+    if (userProfile) {
+      profileSummary.push(
+        `Onboarding: age ${userProfile.ageRange}, education ${userProfile.education}, field ${userProfile.field}, country ${userProfile.country}, career stage ${userProfile.careerStage}.`
+      )
+    }
+    if (psychometricProfile) {
+      profileSummary.push(`CRI: ${psychometricProfile.cri}/160. ${psychometricProfile.criInterpretation || ""}`)
+      if (psychometricProfile.parameters?.length) {
+        profileSummary.push(
+          "Parameters: " +
+            psychometricProfile.parameters
+              .map((p) => `${p.name} ${p.score}/100: ${p.interpretation}`)
+              .join(" | ")
+        )
+      }
+    }
+    const contextBlock = profileSummary.length
+      ? profileSummary.join("\n")
+      : "No user or psychometric data available."
+
+    const synthesisPrompt = `You are the NexPath.AI career mentor. Based on the following profile data, write a single in-depth profile synthesis (2 to 4 short paragraphs) that will be shown to the user as the first message when they start career guidance after their psychometric assessment.
+
+Write in second person ("You show...", "Your profile suggests..."). Be warm, professional, and realistic. Do not list raw scores; synthesize strengths and what they mean for learning and career fit. End with one sentence inviting them to explore broad career domains or tell you their interests.
+
+Profile data:
+${contextBlock}
+
+Write only the synthesis text, no headings or labels.`
+
+    let synthesisContent: string
+    try {
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: synthesisPrompt }],
+        temperature: 0.4,
+        max_tokens: 600,
+      })
+      synthesisContent =
+        completion.choices[0]?.message?.content?.trim() ||
+        "Based on your psychometric assessment, I have a good understanding of your cognitive profile. Let's explore career paths that fit your strengths. You can choose a broad domain below or tell me your interests."
+    } catch (err) {
+      console.error("OpenAI synthesis error:", err)
+      synthesisContent =
+        "Based on your psychometric assessment, I have a good understanding of your cognitive profile. Let's explore career paths that fit your strengths. You can choose a broad domain below or tell me your interests."
+    }
+
+    await sessionRef.collection("messages").add({
+      role: "assistant",
+      content: synthesisContent,
+      timestamp: FieldValue.serverTimestamp(),
+    })
+    await sessionRef.update({ lastUpdated: FieldValue.serverTimestamp() })
 
     return {
       sessionId: sessionRef.id,
-      title: typeof title === "string" ? title : "New Career Session",
-      hasAssessment: Boolean(hasAssessment),
+      title,
+      hasAssessment: true,
     }
   }
 )

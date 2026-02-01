@@ -9,7 +9,12 @@
  * 6. Current User Message
  */
 
-import type { UserProfile, PsychometricProfile, ChatMessage } from "./types"
+import type {
+  UserProfile,
+  PsychometricProfile,
+  PsychometricProfileStored,
+  ChatMessage,
+} from "./types"
 
 const SYSTEM_PROMPT = `You are a wise, ethical, experienced career mentor for NexPath.AI. Your role is to guide users toward fulfilling careers based on their goals, strengths, and psychometric insights.
 
@@ -31,6 +36,38 @@ function buildUserProfileContext(profile: UserProfile | null): string {
 - Field: ${profile.field}
 - Country/Region: ${profile.country}
 - Career stage: ${profile.careerStage}`
+}
+
+/** Convert stored profile (canonical) to legacy shape; exclude removed insights, apply user corrections */
+export function storedProfileToContextProfile(
+  stored: PsychometricProfileStored | null
+): PsychometricProfile | null {
+  if (!stored?.CRI) return null
+  const params = stored.parameters || {}
+  const removed = new Set(stored.removedInsights || [])
+  const corrections = stored.userCorrections || {}
+  const parameterNames: Record<string, string> = {
+    logical_reasoning: "Logical Reasoning",
+    verbal_reasoning: "Verbal Reasoning",
+    learning_adaptability: "Learning Adaptability",
+    problem_solving_speed: "Problem-Solving Speed",
+    curiosity_openness: "Curiosity & Openness",
+    persistence_grit: "Persistence & Grit",
+    attention_focus: "Attention & Focus",
+  }
+  const parameters = Object.entries(params)
+    .filter(([k, p]) => p.status !== "removed" && !removed.has(k))
+    .map(([k, p]) => ({
+      name: parameterNames[k] || k,
+      score: p.score,
+      interpretation: corrections[k] ?? p.interpretation,
+    }))
+  return {
+    cri: stored.CRI.score,
+    criInterpretation: `${stored.CRI.band}: ${stored.CRI.summary}`,
+    parameters,
+    completedAt: stored.completedAt,
+  }
 }
 
 function buildPsychometricContext(psychometric: PsychometricProfile | null): string {
@@ -72,11 +109,18 @@ export interface BuildContextInput {
 
 export function buildLLMContext(input: BuildContextInput): { system: string; user: string } {
   const { userProfile, psychometricProfile, chatHistory, currentUserMessage } = input
+  const profileForContext =
+    psychometricProfile &&
+    "CRI" in psychometricProfile &&
+    psychometricProfile.parameters &&
+    !Array.isArray(psychometricProfile.parameters)
+      ? storedProfileToContextProfile(psychometricProfile as unknown as PsychometricProfileStored)
+      : psychometricProfile
   const system = [
     SYSTEM_PROMPT,
     PLATFORM_CONTEXT,
     buildUserProfileContext(userProfile),
-    buildPsychometricContext(psychometricProfile),
+    buildPsychometricContext(profileForContext),
   ].join("\n\n")
   const user = [
     buildChatHistoryContext(chatHistory),

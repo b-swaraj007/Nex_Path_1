@@ -7,7 +7,9 @@
     "dev": "next dev",
     "lint": "eslint .",
     "start": "next start",
-    "deploy:functions": "cd functions && npm run build && cd .. && firebase deploy --only functions"
+    "deploy:functions": "cd functions && npm run build && cd .. && firebase deploy --only functions",
+    "deploy:firebase": "firebase deploy",
+    "deploy:firestore": "firebase deploy --only firestore"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",
